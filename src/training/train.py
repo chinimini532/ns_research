@@ -1,0 +1,366 @@
+"""
+src/training/train.py
+
+Main training script. Trains all 5 models sequentially.
+
+Usage:
+    python src/training/train.py                    # train all models
+    python src/training/train.py --model dtln_proposed  # train one model
+
+Each model is trained independently on the same dataset.
+Results saved to outputs/stats/ and outputs/models/.
+"""
+
+import sys
+import time
+import json
+import argparse
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from src.training.config import (
+    DATA_SPLITS, OUT_MODELS, OUT_STATS,
+    BATCH_SIZE, EPOCHS, LR, LR_PATIENCE, LR_FACTOR,
+    EARLY_STOP, GRAD_CLIP, SEED, DEVICE, EXPERIMENTS
+)
+from src.training.loss import MSELoss, AlawLoss
+from src.utils.metrics import evaluate_batch, aggregate_scores
+
+
+# ─── Dataset ──────────────────────────────────────────────────────────────────
+
+class NoisySpeechDataset(Dataset):
+    """
+    Dataset of (noisy_input, clean_target) frame pairs.
+    Loads from preprocessed .npy files.
+    """
+
+    def __init__(self, split: str):
+        """
+        Args:
+            split: 'train', 'val', or 'test'
+        """
+        x_path = DATA_SPLITS / f"X_{split}.npy"
+        y_path = DATA_SPLITS / f"y_{split}.npy"
+
+        if not x_path.exists():
+            raise FileNotFoundError(
+                f"Split not found: {x_path}\n"
+                f"Run: python src/data/preprocess.py && python src/data/split.py"
+            )
+
+        self.X = torch.from_numpy(np.load(x_path)).float()
+        self.y = torch.from_numpy(np.load(y_path)).float()
+
+        assert len(self.X) == len(self.y)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+# ─── Model Factory ────────────────────────────────────────────────────────────
+
+def build_model(model_name: str) -> nn.Module:
+    """Build model from name string."""
+    if model_name == "rnnoise":
+        from src.models.rnnoise import RNNoise
+        return RNNoise()
+    elif model_name == "dtln_baseline":
+        from src.models.dtln_baseline import DTLNBaseline
+        return DTLNBaseline()
+    elif model_name == "dtln_bcsu":
+        from src.models.dtln_bcsu import DTLNWithBCSU
+        return DTLNWithBCSU()
+    elif model_name == "dtln_proposed":
+        from src.models.dtln_proposed import DTLNProposed
+        return DTLNProposed()
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
+
+
+def build_loss(loss_name: str) -> nn.Module:
+    """Build loss function from name string."""
+    if loss_name == "mse":
+        return MSELoss()
+    elif loss_name == "alaw":
+        return AlawLoss()
+    else:
+        raise ValueError(f"Unknown loss: {loss_name}")
+
+
+# ─── Training Loop ────────────────────────────────────────────────────────────
+
+def train_one_epoch(
+    model:      nn.Module,
+    loader:     DataLoader,
+    optimizer:  torch.optim.Optimizer,
+    criterion:  nn.Module,
+    device:     str
+) -> float:
+    """Run one training epoch. Returns mean loss."""
+    model.train()
+    total_loss = 0.0
+
+    for X_batch, y_batch in loader:
+        X_batch = X_batch.to(device)
+        y_batch = y_batch.to(device)
+
+        optimizer.zero_grad()
+        output = model(X_batch)
+        loss   = criterion(output, y_batch)
+        loss.backward()
+
+        # Gradient clipping — important for BCSU stability
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+
+        optimizer.step()
+        total_loss += loss.item()
+
+    return total_loss / len(loader)
+
+
+def validate(
+    model:     nn.Module,
+    loader:    DataLoader,
+    criterion: nn.Module,
+    device:    str
+) -> float:
+    """Run validation. Returns mean loss."""
+    model.eval()
+    total_loss = 0.0
+
+    with torch.no_grad():
+        for X_batch, y_batch in loader:
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+            output  = model(X_batch)
+            loss    = criterion(output, y_batch)
+            total_loss += loss.item()
+
+    return total_loss / len(loader)
+
+
+def evaluate_test(
+    model:  nn.Module,
+    loader: DataLoader,
+    device: str
+) -> dict:
+    """
+    Evaluate model on test set.
+    Computes PESQ, STOI, SNR on batches.
+    Returns aggregated scores.
+    """
+    model.eval()
+    scores_list = []
+
+    with torch.no_grad():
+        for X_batch, y_batch in loader:
+            X_batch = X_batch.to(device)
+            output  = model(X_batch)
+
+            # Convert to numpy for metric computation
+            enhanced_np = output.cpu().numpy()
+            clean_np    = y_batch.numpy()
+
+            scores = evaluate_batch(clean_np, enhanced_np)
+            scores_list.append(scores)
+
+    return aggregate_scores(scores_list)
+
+
+# ─── Single Model Training ────────────────────────────────────────────────────
+
+def train_model(experiment: dict, device: str) -> dict:
+    """
+    Train one model experiment end-to-end.
+
+    Args:
+        experiment: dict from EXPERIMENTS in config.py
+        device:     'cuda', 'cpu', or 'xpu'
+
+    Returns:
+        dict with training stats and test scores
+    """
+    name       = experiment["name"]
+    model_type = experiment["model"]
+    loss_type  = experiment["loss"]
+
+    print(f"\n{'='*55}")
+    print(f"  Training: {name}")
+    print(f"  Model:    {model_type}  |  Loss: {loss_type}")
+    print(f"{'='*55}")
+
+    # Reproducibility
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+
+    # Data
+    train_ds = NoisySpeechDataset("train")
+    val_ds   = NoisySpeechDataset("val")
+    test_ds  = NoisySpeechDataset("test")
+
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0)
+    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+
+    print(f"  Train: {len(train_ds):,} frames")
+    print(f"  Val:   {len(val_ds):,} frames")
+    print(f"  Test:  {len(test_ds):,} frames")
+
+    # Model and loss
+    model     = build_model(model_type).to(device)
+    criterion = build_loss(loss_type).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, patience=LR_PATIENCE, factor=LR_FACTOR, verbose=False
+    )
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Params: {n_params:,}")
+
+    # Training
+    best_val_loss   = float("inf")
+    best_epoch      = 0
+    epochs_no_improv = 0
+    history = {"train_loss": [], "val_loss": [], "lr": []}
+    save_path = OUT_MODELS / f"{name}_best.pt"
+    start_time = time.time()
+
+    for epoch in range(1, EPOCHS + 1):
+        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
+        val_loss   = validate(model, val_loader, criterion, device)
+        scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]["lr"]
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["lr"].append(current_lr)
+
+        # Save best
+        if val_loss < best_val_loss:
+            best_val_loss    = val_loss
+            best_epoch       = epoch
+            epochs_no_improv = 0
+            torch.save(model.state_dict(), save_path)
+        else:
+            epochs_no_improv += 1
+
+        # Print progress every 5 epochs
+        if epoch % 5 == 0 or epoch == 1:
+            print(
+                f"  Epoch {epoch:3d}/{EPOCHS} | "
+                f"train={train_loss:.4f} | "
+                f"val={val_loss:.4f} | "
+                f"best={best_val_loss:.4f} (ep{best_epoch}) | "
+                f"lr={current_lr:.2e}"
+            )
+
+        # Early stopping
+        if epochs_no_improv >= EARLY_STOP:
+            print(f"  Early stopping at epoch {epoch} (no improvement for {EARLY_STOP} epochs)")
+            break
+
+    training_time = time.time() - start_time
+
+    # Load best model for test evaluation
+    model.load_state_dict(torch.load(save_path, map_location=device))
+
+    # Test evaluation
+    print(f"\n  Evaluating on test set...")
+    test_scores = evaluate_test(model, test_loader, device)
+
+    # Collect results
+    result = {
+        "name":           name,
+        "model":          model_type,
+        "loss":           loss_type,
+        "n_params":       n_params,
+        "best_val_loss":  best_val_loss,
+        "best_epoch":     best_epoch,
+        "epochs_trained": epoch,
+        "training_time_s": round(training_time, 1),
+        "save_path":      str(save_path),
+        **test_scores
+    }
+
+    # Save history
+    hist_path = OUT_STATS / f"{name}_history.json"
+    with open(hist_path, "w") as f:
+        json.dump(history, f, indent=2)
+
+    print(f"\n  Results for {name}:")
+    print(f"    PESQ:  {test_scores.get('pesq_mean')}")
+    print(f"    STOI:  {test_scores.get('stoi_mean')}")
+    print(f"    SNR:   {test_scores.get('snr_mean')}")
+    print(f"    Time:  {training_time:.0f}s")
+
+    return result
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model", type=str, default=None,
+        help="Train one model only (e.g. dtln_proposed). Default: train all."
+    )
+    args = parser.parse_args()
+
+    torch.manual_seed(SEED)
+    device = DEVICE
+    print(f"\nDevice: {device}")
+
+    # Select experiments
+    if args.model:
+        experiments = [e for e in EXPERIMENTS if e["name"] == args.model]
+        if not experiments:
+            print(f"Unknown model: {args.model}")
+            print(f"Available: {[e['name'] for e in EXPERIMENTS]}")
+            return
+    else:
+        experiments = EXPERIMENTS
+
+    # Train all
+    all_results = []
+    total_start = time.time()
+
+    for exp in experiments:
+        result = train_model(exp, device)
+        all_results.append(result)
+
+        # Save running results after each model
+        df = pd.DataFrame(all_results)
+        df.to_csv(OUT_STATS / "all_training_stats.csv", index=False)
+
+    total_time = time.time() - total_start
+
+    # Final summary
+    print(f"\n{'='*55}")
+    print(f"  All Training Complete")
+    print(f"{'='*55}")
+    print(f"  Total time: {total_time/60:.1f} minutes")
+    print(f"\n  Results summary:")
+
+    df = pd.DataFrame(all_results)
+    cols = ["name", "n_params", "best_val_loss", "pesq_mean", "stoi_mean", "snr_mean", "training_time_s"]
+    available_cols = [c for c in cols if c in df.columns]
+    print(df[available_cols].to_string(index=False))
+
+    print(f"\n  Stats saved to: {OUT_STATS}")
+    print(f"  Models saved to: {OUT_MODELS}")
+    print(f"\n  Next: open notebooks/evaluation.ipynb")
+
+
+if __name__ == "__main__":
+    main()
