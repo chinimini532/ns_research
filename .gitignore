@@ -1,0 +1,26 @@
+# Datasets
+data/raw/
+data/processed/
+data/splits/
+
+# Saved models
+outputs/models/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+venv311/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/settings.json
+
+# OS
+.DS_Store
+Thumbs.db
