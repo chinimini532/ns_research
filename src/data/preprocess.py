@@ -153,76 +153,87 @@ def process_chunk(speech_files: list, noise_files: list) -> tuple:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fraction", type=float, default=FRACTION)
-    parser.add_argument("--chunk-size", type=int, default=500,
-                        help="Files per chunk (default 500). Reduce if OOM.")
+    parser.add_argument("--chunk-size", type=int, default=100)
     args = parser.parse_args()
 
     random.seed(SEED)
     np.random.seed(SEED)
 
     print("=" * 55)
-    print("  NS Research — Preprocessing (Chunked)")
+    print("  NS Research — Preprocessing")
     print("=" * 55)
     print(f"  Fraction:   {args.fraction}")
-    print(f"  Chunk size: {args.chunk_size} files per chunk")
-    print(f"  Frame:      {FRAME_SIZE} samples = 20ms at {TARGET_SR}Hz")
-    print(f"  SNR:        {SNR_MIN} to {SNR_MAX} dB")
+    print(f"  Chunk size: {args.chunk_size}")
     print("=" * 55)
 
     print("\nCollecting files...")
     speech_files = collect_speech_files(args.fraction)
     noise_files  = collect_noise_files(args.fraction)
 
-    # Process in chunks and save to disk
     DATA_PROC.mkdir(parents=True, exist_ok=True)
-    x_path = DATA_PROC / "X_noisy.npy"
-    y_path = DATA_PROC / "y_clean.npy"
+    chunk_dir = DATA_PROC / "chunks"
+    chunk_dir.mkdir(exist_ok=True)
 
-    # Split speech files into chunks
-    chunk_size  = args.chunk_size
-    chunks      = [speech_files[i:i+chunk_size] for i in range(0, len(speech_files), chunk_size)]
+    chunks = [
+        speech_files[i:i+args.chunk_size]
+        for i in range(0, len(speech_files), args.chunk_size)
+    ]
+
     total_frames = 0
-    all_X = []
-    all_y = []
-
-    print(f"\nProcessing {len(chunks)} chunks of ~{chunk_size} files each...")
 
     for i, chunk in enumerate(chunks):
-        print(f"\n  Chunk {i+1}/{len(chunks)} ({len(chunk)} files)...")
-        X_chunk, y_chunk = process_chunk(chunk, noise_files)
-
-        if X_chunk is None:
-            print(f"  Chunk {i+1}: no valid frames, skipping")
+        print(f"\n  Chunk {i+1}/{len(chunks)}...")
+        X, y = process_chunk(chunk, noise_files)
+        if X is None:
+            print(f"  Chunk {i+1}: skipped")
             continue
+        # Save immediately to disk
+        np.save(chunk_dir / f"X_{i:04d}.npy", X)
+        np.save(chunk_dir / f"y_{i:04d}.npy", y)
+        total_frames += len(X)
+        print(f"  Saved {len(X):,} | Total: {total_frames:,}")
+        del X, y
 
-        all_X.append(X_chunk)
-        all_y.append(y_chunk)
-        total_frames += len(X_chunk)
-        print(f"  Chunk {i+1}: {len(X_chunk):,} frames | Total so far: {total_frames:,}")
+    # Merge using memmap — no RAM needed
+    print("\nMerging chunks to final files...")
+    x_files = sorted(chunk_dir.glob("X_*.npy"))
+    y_files = sorted(chunk_dir.glob("y_*.npy"))
 
-        # Free chunk memory
-        del X_chunk, y_chunk
+    x_out = DATA_PROC / "X_noisy.npy"
+    y_out = DATA_PROC / "y_clean.npy"
 
-    if not all_X:
-        raise RuntimeError("No frames generated.")
+    X_mm = np.lib.format.open_memmap(
+        str(x_out), mode='w+', dtype='float32',
+        shape=(total_frames, FRAME_SIZE)
+    )
+    y_mm = np.lib.format.open_memmap(
+        str(y_out), mode='w+', dtype='float32',
+        shape=(total_frames, FRAME_SIZE)
+    )
 
-    print("\nConcatenating and saving...")
-    X_noisy = np.concatenate(all_X, axis=0).astype(np.float32)
-    y_clean = np.concatenate(all_y, axis=0).astype(np.float32)
+    offset = 0
+    for xf, yf in zip(x_files, y_files):
+        Xc = np.load(xf)
+        yc = np.load(yf)
+        n  = len(Xc)
+        X_mm[offset:offset+n] = Xc
+        y_mm[offset:offset+n] = yc
+        offset += n
+        del Xc, yc
+        xf.unlink()
+        yf.unlink()
 
-    np.save(x_path, X_noisy)
-    np.save(y_path, y_clean)
+    del X_mm, y_mm
+    chunk_dir.rmdir()
 
     print("\n" + "=" * 55)
     print("  Preprocessing Complete")
     print("=" * 55)
-    print(f"  X_noisy shape: {X_noisy.shape}")
-    print(f"  y_clean shape: {y_clean.shape}")
-    print(f"  Total frames:  {len(X_noisy):,}")
-    print(f"  Total audio:   {len(X_noisy) * FRAME_SIZE / TARGET_SR / 60:.1f} minutes")
-    size_mb = (X_noisy.nbytes + y_clean.nbytes) / 1e6
-    print(f"  File size:     {size_mb:.1f} MB")
-    print(f"  Saved to:      {DATA_PROC}")
+    print(f"  Total frames: {total_frames:,}")
+    print(f"  Total audio:  {total_frames * FRAME_SIZE / TARGET_SR / 60:.1f} min")
+    size = total_frames * FRAME_SIZE * 4 * 2 / 1e9
+    print(f"  File size:    {size:.1f} GB")
+    print(f"  Saved to:     {DATA_PROC}")
     print("=" * 55)
     print("\n  Next: python src/data/split.py")
 
