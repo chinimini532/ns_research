@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
+from src.training.config import DATA_SPLITS, DATA_PROC
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -37,29 +38,24 @@ from src.utils.metrics import evaluate_batch, aggregate_scores
 # ─── Dataset ──────────────────────────────────────────────────────────────────
 
 class NoisySpeechDataset(Dataset):
-    """
-    Dataset of (noisy_input, clean_target) frame pairs.
-    Loads from preprocessed .npy files.
-    """
-
     def __init__(self, split: str):
-        """
-        Args:
-            split: 'train', 'val', or 'test'
-        """
-        x_path = DATA_SPLITS / f"X_{split}.npy"
-        y_path = DATA_SPLITS / f"y_{split}.npy"
+        # Kaggle mounted path
+        kaggle_path = Path("/kaggle/input/datasets/yesha1910/ns-research-splits")
+        
+        if kaggle_path.exists():
+            x_path = kaggle_path / f"X_{split}.npy"
+            y_path = kaggle_path / f"y_{split}.npy"
+        else:
+            x_path = DATA_SPLITS / f"X_{split}.npy"
+            y_path = DATA_SPLITS / f"y_{split}.npy"
 
         if not x_path.exists():
-            raise FileNotFoundError(
-                f"Split not found: {x_path}\n"
-                f"Run: python src/data/preprocess.py && python src/data/split.py"
-            )
+            raise FileNotFoundError(f"Split not found: {x_path}")
 
-        self.X = torch.from_numpy(np.load(x_path)).float()
-        self.y = torch.from_numpy(np.load(y_path)).float()
-
-        assert len(self.X) == len(self.y)
+        print(f"  Loading {split} from {x_path.parent}...")
+        self.X = torch.from_numpy(np.load(str(x_path))).float()
+        self.y = torch.from_numpy(np.load(str(y_path))).float()
+        print(f"  {split}: {len(self.X):,} frames")
 
     def __len__(self):
         return len(self.X)
