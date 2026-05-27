@@ -40,7 +40,7 @@ from src.utils.metrics import evaluate_batch, aggregate_scores
 class NoisySpeechDataset(Dataset):
     def __init__(self, split: str):
         # Kaggle mounted path
-        kaggle_path = Path("/kaggle/input/datasets/yesha1910/ns-research-splits")
+        kaggle_path = Path("/kaggle/input/datasets/yesha1910/ns-research-splits/splits")
         
         if kaggle_path.exists():
             x_path = kaggle_path / f"X_{split}.npy"
