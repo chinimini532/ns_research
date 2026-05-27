@@ -60,28 +60,40 @@ def collect_speech_files(fraction: float) -> list:
 def collect_noise_files(fraction: float) -> list:
     noise_files = []
 
-    kaggle_musan    = Path("/kaggle/input/datasets/nhattruongdev/musan-noise/musan/noise")
-    local_musan     = DATA_RAW / "musan"
-    local_synthetic = DATA_RAW / "musan_synthetic"
+    # Kaggle mounted MUSAN noise
+    kaggle_musan = Path("/kaggle/input/datasets/nhattruongdev/musan-noise/musan/noise")
+    # Local ESC-50
+    local_esc50  = DATA_RAW / "ESC-50-master" / "audio"
+    # Local DEMAND
+    local_demand = DATA_RAW / "Demand"
+    # Local synthetic
+    local_synth  = DATA_RAW / "musan_synthetic"
 
     if kaggle_musan.exists():
         noise_files.extend(list(kaggle_musan.rglob("*.wav")))
-        print(f"  Using Kaggle MUSAN noise")
-    elif local_musan.exists():
-        noise_files.extend(list(local_musan.rglob("*.wav")))
-        print(f"  Using local MUSAN")
-    elif local_synthetic.exists():
-        noise_files.extend(list(local_synthetic.rglob("*.wav")))
-        print(f"  Using synthetic noise")
-    else:
-        raise FileNotFoundError("No noise files found.")
+        print(f"  Using Kaggle MUSAN noise: {len(noise_files)} files")
+
+    if local_esc50.exists():
+        esc_files = list(local_esc50.glob("*.wav"))
+        noise_files.extend(esc_files)
+        print(f"  Using ESC-50: {len(esc_files)} files")
+
+    if local_demand.exists():
+        demand_files = list(local_demand.rglob("*.wav"))
+        noise_files.extend(demand_files)
+        print(f"  Using DEMAND: {len(demand_files)} files")
+
+    if local_synth.exists():
+        synth_files = list(local_synth.glob("*.wav"))
+        noise_files.extend(synth_files)
+        print(f"  Using synthetic: {len(synth_files)} files")
 
     if not noise_files:
-        raise FileNotFoundError("No .wav files found in noise directory.")
+        raise FileNotFoundError("No noise files found.")
 
     random.seed(SEED + 1)
     random.shuffle(noise_files)
-    print(f"  Noise files: {len(noise_files)}")
+    print(f"  Total noise files: {len(noise_files)}")
     return noise_files
 
 
@@ -103,14 +115,23 @@ def get_noise_segment(noise_files: list, length: int) -> np.ndarray:
             continue
         if noise is None or len(noise) < 100:
             continue
-        sr = TARGET_SR if "synthetic" in str(noise_path) else SOURCE_SR
+
+        # Determine sample rate from path
+        path_str = str(noise_path)
+        if "synthetic" in path_str:
+            sr = TARGET_SR
+        else:
+            sr = SOURCE_SR  # ESC-50, DEMAND, MUSAN all 16kHz
+
         noise = resample_to_8k(noise, sr)
+
         if len(noise) < length:
             noise = np.tile(noise, (length // len(noise)) + 2)
+
         start = random.randint(0, len(noise) - length)
         return noise[start: start + length].astype(np.float32)
-    return np.random.randn(length).astype(np.float32) * 0.1
 
+    return np.random.randn(length).astype(np.float32) * 0.1
 
 def process_chunk(speech_files: list, noise_files: list) -> tuple:
     """Process a chunk of speech files and return frame arrays."""
