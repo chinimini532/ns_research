@@ -164,7 +164,7 @@ def train_model(experiment: dict, device: str) -> dict:
     criterion = build_loss(loss_type).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, patience=LR_PATIENCE, factor=LR_FACTOR, verbose=False
+        optimizer, patience=LR_PATIENCE, factor=LR_FACTOR
     )
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -211,7 +211,7 @@ def train_model(experiment: dict, device: str) -> dict:
             break
 
     training_time = time.time() - start_time
-    model.load_state_dict(torch.load(save_path, map_location=device))
+    model.load_state_dict(torch.load(save_path, map_location=device, weights_only=True))
 
     print(f"\n  Evaluating on test set...")
     test_scores = evaluate_test(model, test_loader, device)
