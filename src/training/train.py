@@ -88,6 +88,9 @@ def build_loss(loss_name: str) -> nn.Module:
         return MSELoss()
     elif loss_name == "alaw":
         return AlawLoss()
+    elif loss_name == "reconstruction":
+        from src.utils.alaw import ReconstructionLoss
+        return ReconstructionLoss()
     else:
         raise ValueError(f"Unknown loss: {loss_name}")
 
@@ -158,15 +161,15 @@ def train_model(experiment: dict, device: str) -> dict:
 
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=2, pin_memory=(device == "cuda")
+        num_workers=4, pin_memory=(device == "cuda")
     )
     val_loader = DataLoader(
         val_ds, batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=2, pin_memory=(device == "cuda")
+        num_workers=4, pin_memory=(device == "cuda")
     )
     test_loader = DataLoader(
         test_ds, batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=2, pin_memory=(device == "cuda")
+        num_workers=4, pin_memory=(device == "cuda")
     )
 
     print(f"  Train: {len(train_ds):,} frames")
