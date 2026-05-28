@@ -85,13 +85,25 @@ EXPERIMENTS = [
         "name":        "dtln_bcsu",
         "model":       "dtln_bcsu",
         "loss":        "mse",
-        "description": "DTLN + BCSU + MSE loss (ablation)"
+        "description": "DTLN + BCSU + masking + MSE (ablation)"
+    },
+    {
+        "name":        "dtln_proposed_mask",
+        "model":       "dtln_bcsu",
+        "loss":        "alaw",
+        "description": "BCSU + masking + A-law loss"
     },
     {
         "name":        "dtln_proposed",
         "model":       "dtln_proposed",
         "loss":        "alaw",
-        "description": "Proposed: DTLN + BCSU + A-law loss"
+        "description": "BCSU + direct mapping + A-law (proposed)"
+    },
+    {
+        "name":        "dtln_proposed_mse",
+        "model":       "dtln_proposed",
+        "loss":        "mse",
+        "description": "BCSU + direct mapping + MSE (ablation)"
     },
 ]
 
