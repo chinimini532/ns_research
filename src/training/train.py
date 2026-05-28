@@ -1,11 +1,6 @@
 """
 src/training/train.py
-
 Main training script. Trains all 5 models sequentially.
-
-Usage:
-    python src/training/train.py                        # train all models
-    python src/training/train.py --model dtln_proposed  # train one model
 """
 
 import sys
@@ -36,19 +31,28 @@ from src.utils.metrics import evaluate_batch, aggregate_scores
 
 class NoisySpeechDataset(Dataset):
     def __init__(self, split: str):
+        # Try Kaggle path first
         kaggle_path = Path("/kaggle/input/datasets/yesha1910/ns-research-splits/splits")
+        # Try Colab path
+        colab_path  = Path("/content/ns_research/data/splits")
 
         if kaggle_path.exists():
-            x_path = kaggle_path / f"X_{split}.npy"
-            y_path = kaggle_path / f"y_{split}.npy"
+            base = kaggle_path
+        elif colab_path.exists():
+            base = colab_path
         else:
-            x_path = DATA_SPLITS / f"X_{split}.npy"
-            y_path = DATA_SPLITS / f"y_{split}.npy"
+            base = DATA_SPLITS
+
+        x_path = base / f"X_{split}.npy"
+        y_path = base / f"y_{split}.npy"
 
         if not x_path.exists():
-            raise FileNotFoundError(f"Split not found: {x_path}")
+            raise FileNotFoundError(
+                f"Split not found: {x_path}\n"
+                f"Checked: {kaggle_path}, {colab_path}, {DATA_SPLITS}"
+            )
 
-        print(f"  Loading {split} from {x_path.parent}...")
+        print(f"  Loading {split} from {base}...")
         self.X = torch.from_numpy(np.load(str(x_path))).float()
         self.y = torch.from_numpy(np.load(str(y_path))).float()
         print(f"  {split}: {len(self.X):,} frames")
@@ -124,11 +128,11 @@ def evaluate_test(model, loader, device) -> dict:
     scores_list = []
     with torch.no_grad():
         for X_batch, y_batch in loader:
-            X_batch = X_batch.to(device)
-            output  = model(X_batch)
+            X_batch     = X_batch.to(device)
+            output      = model(X_batch)
             enhanced_np = output.cpu().numpy()
             clean_np    = y_batch.numpy()
-            scores = evaluate_batch(clean_np, enhanced_np)
+            scores      = evaluate_batch(clean_np, enhanced_np)
             scores_list.append(scores)
     return aggregate_scores(scores_list)
 
@@ -152,9 +156,18 @@ def train_model(experiment: dict, device: str) -> dict:
     val_ds   = NoisySpeechDataset("val")
     test_ds  = NoisySpeechDataset("test")
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0)
-    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-    test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    train_loader = DataLoader(
+        train_ds, batch_size=BATCH_SIZE, shuffle=True,
+        num_workers=2, pin_memory=(device == "cuda")
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=BATCH_SIZE, shuffle=False,
+        num_workers=2, pin_memory=(device == "cuda")
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=BATCH_SIZE, shuffle=False,
+        num_workers=2, pin_memory=(device == "cuda")
+    )
 
     print(f"  Train: {len(train_ds):,} frames")
     print(f"  Val:   {len(val_ds):,} frames")
@@ -170,14 +183,15 @@ def train_model(experiment: dict, device: str) -> dict:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Params: {n_params:,}")
 
+    OUT_MODELS.mkdir(parents=True, exist_ok=True)
+    OUT_STATS.mkdir(parents=True, exist_ok=True)
+
     best_val_loss    = float("inf")
     best_epoch       = 0
     epochs_no_improv = 0
     history          = {"train_loss": [], "val_loss": [], "lr": []}
-    OUT_MODELS.mkdir(parents=True, exist_ok=True)
-    OUT_STATS.mkdir(parents=True, exist_ok=True)
-    save_path  = OUT_MODELS / f"{name}_best.pt"
-    start_time = time.time()
+    save_path        = OUT_MODELS / f"{name}_best.pt"
+    start_time       = time.time()
 
     for epoch in range(1, EPOCHS + 1):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
@@ -211,7 +225,11 @@ def train_model(experiment: dict, device: str) -> dict:
             break
 
     training_time = time.time() - start_time
-    model.load_state_dict(torch.load(save_path, map_location=device, weights_only=True))
+
+    # Load best model for evaluation
+    model.load_state_dict(
+        torch.load(save_path, map_location=device, weights_only=True)
+    )
 
     print(f"\n  Evaluating on test set...")
     test_scores = evaluate_test(model, test_loader, device)
@@ -237,7 +255,7 @@ def train_model(experiment: dict, device: str) -> dict:
     print(f"    PESQ:  {test_scores.get('pesq_mean')}")
     print(f"    STOI:  {test_scores.get('stoi_mean')}")
     print(f"    SNR:   {test_scores.get('snr_mean')}")
-    print(f"    Time:  {training_time:.0f}s")
+    print(f"    Time:  {training_time:.0f}s ({training_time/3600:.2f}hrs)")
 
     return result
 
@@ -246,21 +264,23 @@ def train_model(experiment: dict, device: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default=None)
+    parser.add_argument("--model", type=str, default=None,
+                        help="Train one model only. Default: train all.")
     args = parser.parse_args()
 
     torch.manual_seed(SEED)
     device = DEVICE
     print(f"\nDevice: {device}")
+    if device == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
 
+    experiments = EXPERIMENTS
     if args.model:
         experiments = [e for e in EXPERIMENTS if e["name"] == args.model]
         if not experiments:
             print(f"Unknown model: {args.model}")
             print(f"Available: {[e['name'] for e in EXPERIMENTS]}")
             return
-    else:
-        experiments = EXPERIMENTS
 
     all_results = []
     total_start = time.time()
@@ -270,21 +290,22 @@ def main():
         all_results.append(result)
         df = pd.DataFrame(all_results)
         df.to_csv(OUT_STATS / "all_training_stats.csv", index=False)
+        print(f"\n  Saved stats to {OUT_STATS / 'all_training_stats.csv'}")
 
     total_time = time.time() - total_start
 
     print(f"\n{'='*55}")
     print(f"  All Training Complete")
     print(f"{'='*55}")
-    print(f"  Total time: {total_time/60:.1f} minutes")
+    print(f"  Total time: {total_time/60:.1f} minutes ({total_time/3600:.2f} hours)")
 
-    df = pd.DataFrame(all_results)
+    df   = pd.DataFrame(all_results)
     cols = ["name", "n_params", "best_val_loss", "pesq_mean", "stoi_mean", "snr_mean", "training_time_s"]
     available_cols = [c for c in cols if c in df.columns]
     print(df[available_cols].to_string(index=False))
 
-    print(f"\n  Stats saved to: {OUT_STATS}")
-    print(f"  Models saved to: {OUT_MODELS}")
+    print(f"\n  Models: {OUT_MODELS}")
+    print(f"  Stats:  {OUT_STATS}")
 
 
 if __name__ == "__main__":
