@@ -79,6 +79,15 @@ def build_model(model_name: str) -> nn.Module:
     elif model_name == "dtln_proposed":
         from src.models.dtln_proposed import DTLNProposed
         return DTLNProposed()
+    elif model_name == "conv_tasnet":
+        from src.models.conv_tasnet import ConvTasNet
+        return ConvTasNet()
+    elif model_name == "bcsu_tasnet":
+        from src.models.bcsu_tasnet import BCSUTasNet
+        return BCSUTasNet()
+    elif model_name == "rnnoise_bcsu":
+        from src.models.rnnoise_bcsu import RNNoiseBCSU
+        return RNNoiseBCSU()
     else:
         raise ValueError(f"Unknown model: {model_name}")
 

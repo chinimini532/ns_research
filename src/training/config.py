@@ -105,6 +105,24 @@ EXPERIMENTS = [
         "loss":        "mse",
         "description": "BCSU + direct mapping + MSE (ablation)"
     },
+    {
+    "name":        "conv_tasnet",
+    "model":       "conv_tasnet",
+    "loss":        "mse",
+    "description": "Conv-TasNet baseline retrained on A-law data"
+    },
+    {
+    "name":        "bcsu_tasnet",
+    "model":       "bcsu_tasnet",
+    "loss":        "alaw",
+    "description": "BCSU-TasNet proposed on Architecture 2"
+    },
+    {
+    "name":        "rnnoise_bcsu",
+    "model":       "rnnoise_bcsu",
+    "loss":        "alaw",
+    "description": "RNNoise + BCSU proposed on Architecture 3"
+    },
 ]
 
 # Evaluation
